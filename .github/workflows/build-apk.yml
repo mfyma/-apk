@@ -1,0 +1,132 @@
+name: Build Android APK from ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "GodotAICraft_Android_v2.0.zip"
+      - ".github/workflows/build-apk.yml"
+
+permissions:
+  contents: read
+
+env:
+  GODOT_VERSION: "4.4.1"
+  ZIP_FILE: "GodotAICraft_Android_v2.0.zip"
+  PROJECT_DIR: "extracted/GodotAICraft_Android_v2.0"
+  APK_PATH: "extracted/GodotAICraft_Android_v2.0/build/android/GodotAICraft-debug.apk"
+
+jobs:
+  build-apk:
+    name: Unzip and build Debug APK
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.4.1
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install unzip
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v unzip >/dev/null 2>&1; then
+            apt-get update
+            apt-get install -y --no-install-recommends unzip
+          fi
+
+      - name: Extract project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$ZIP_FILE"
+          rm -rf extracted
+          mkdir -p extracted
+          unzip -q "$ZIP_FILE" -d extracted
+          test -f "$PROJECT_DIR/project.godot"
+          test -f "$PROJECT_DIR/export_presets.cfg"
+          echo "Project extracted to: $PROJECT_DIR"
+          find "$PROJECT_DIR" -maxdepth 2 -type f | sort
+
+      - name: Prepare Godot export templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$DEST"
+
+          if [ ! -f "$DEST/android_debug.apk" ]; then
+            TEMPLATE_APK="$(find /root /usr/local/share -type f -path "*/${GODOT_VERSION}.stable/android_debug.apk" -print -quit 2>/dev/null || true)"
+            test -n "$TEMPLATE_APK"
+            cp -a "$(dirname "$TEMPLATE_APK")/." "$DEST/"
+          fi
+
+          test -f "$DEST/android_debug.apk"
+
+      - name: Create Android debug keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          keytool -genkeypair \
+            -keystore "$GITHUB_WORKSPACE/debug.keystore" \
+            -storepass android \
+            -alias androiddebugkey \
+            -keypass android \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Godot AI Craft,C=US"
+
+      - name: Configure Android SDK and Java for Godot
+        shell: bash
+        run: |
+          set -euo pipefail
+          JAVA_DIR="${JAVA_HOME:-$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")}" 
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/lib/android-sdk}}"
+
+          test -d "$JAVA_DIR"
+          test -d "$SDK_DIR"
+          mkdir -p "$HOME/.config/godot"
+
+          cat > "$HOME/.config/godot/editor_settings-4.tres" <<SETTINGS
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$SDK_DIR"
+          export/android/java_sdk_path = "$JAVA_DIR"
+          export/android/debug_keystore = "$GITHUB_WORKSPACE/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
+          SETTINGS
+
+          godot --version
+          java -version
+
+      - name: Validate Godot project
+        shell: bash
+        run: |
+          set -euo pipefail
+          godot --headless --path "$PROJECT_DIR" --editor --quit
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_ABS="$GITHUB_WORKSPACE/$APK_PATH"
+          mkdir -p "$(dirname "$APK_ABS")"
+          godot --headless --path "$PROJECT_DIR" --export-debug Android "$APK_ABS"
+          test -s "$APK_ABS"
+          sha256sum "$APK_ABS" | tee "${APK_ABS}.sha256"
+          ls -lh "$APK_ABS" "${APK_ABS}.sha256"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GodotAICraft-debug-apk
+          path: |
+            ${{ env.APK_PATH }}
+            ${{ env.APK_PATH }}.sha256
+          if-no-files-found: error
+          retention-days: 30
