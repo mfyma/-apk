@@ -13,6 +13,8 @@ permissions:
 
 env:
   GODOT_VERSION: "4.4.1"
+  ANDROID_API_LEVEL: "34"
+  ANDROID_BUILD_TOOLS: "34.0.0"
   ZIP_FILE: "GodotAICraft_Android_v2.0.zip"
   PROJECT_DIR: "extracted/GodotAICraft_Android_v2.0"
   APK_PATH: "extracted/GodotAICraft_Android_v2.0/build/android/GodotAICraft-debug.apk"
@@ -28,14 +30,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install unzip
+      - name: Install basic tools
         shell: bash
         run: |
           set -euo pipefail
-          if ! command -v unzip >/dev/null 2>&1; then
-            apt-get update
-            apt-get install -y --no-install-recommends unzip
-          fi
+          apt-get update
+          apt-get install -y --no-install-recommends unzip ca-certificates
 
       - name: Extract project ZIP
         shell: bash
@@ -47,8 +47,12 @@ jobs:
           unzip -q "$ZIP_FILE" -d extracted
           test -f "$PROJECT_DIR/project.godot"
           test -f "$PROJECT_DIR/export_presets.cfg"
+
+          # Godot 4.4 targets Android SDK 34 by default. Make it explicit.
+          sed -i 's|gradle_build/target_sdk=""|gradle_build/target_sdk="34"|' "$PROJECT_DIR/export_presets.cfg"
+
           echo "Project extracted to: $PROJECT_DIR"
-          find "$PROJECT_DIR" -maxdepth 2 -type f | sort
+          grep -n 'target_sdk' "$PROJECT_DIR/export_presets.cfg"
 
       - name: Prepare Godot export templates
         shell: bash
@@ -64,6 +68,35 @@ jobs:
           fi
 
           test -f "$DEST/android_debug.apk"
+
+      - name: Install Android SDK 34 packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/lib/android-sdk}}"
+
+          if [ -x "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_DIR/cmdline-tools/latest/bin/sdkmanager"
+          elif command -v sdkmanager >/dev/null 2>&1; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          else
+            echo "sdkmanager was not found in the Godot CI image."
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --sdk_root="$SDK_DIR" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --sdk_root="$SDK_DIR" \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API_LEVEL}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}"
+
+          test -f "$SDK_DIR/platforms/android-${ANDROID_API_LEVEL}/android.jar"
+          test -x "$SDK_DIR/build-tools/${ANDROID_BUILD_TOOLS}/apksigner"
+          test -x "$SDK_DIR/build-tools/${ANDROID_BUILD_TOOLS}/zipalign"
+
+          echo "Android SDK packages installed successfully."
+          ls -la "$SDK_DIR/platforms/android-${ANDROID_API_LEVEL}" | head
+          ls -la "$SDK_DIR/build-tools/${ANDROID_BUILD_TOOLS}" | head
 
       - name: Create Android debug keystore
         shell: bash
